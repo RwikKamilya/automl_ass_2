@@ -51,7 +51,7 @@ class IPL(VerticalModelEvaluator):
             alpha = y_mean - beta * x_mean
 
         k = float(np.exp(alpha))
-        c = max(0.0, -float(beta))  # enforce non-negative exponent
+        c = max(0.0, -float(beta))
         a = y_min - eps
 
         b = k
@@ -117,7 +117,6 @@ class IPL(VerticalModelEvaluator):
 
 
 if __name__ == "__main__":
-    # ----------------- Basic unit tests for IPL -----------------
     logging.basicConfig(level=logging.INFO)
 
 
@@ -148,28 +147,23 @@ if __name__ == "__main__":
     final_anchor = 128
     evaluator = IPL(surrogate_model=surrogate, minimal_anchor=minimal_anchor, final_anchor=final_anchor)
 
-    cfg = {"n_neighbors": 5}  # arbitrary; surrogate ignores it
+    cfg = {"n_neighbors": 5}
 
-    # Case A: best_so_far is None -> should evaluate partial schedule + final anchor.
     evals_first = evaluator.evaluate_model(best_so_far=None, configuration=cfg)
     partial_schedule = evaluator._partial_anchor_schedule()
-    # Expect len(partials) + 1 for final anchor
     assert len(evals_first) == len(partial_schedule) + 1, "First config should evaluate all partial anchors + final."
     assert evals_first[-1][0] == final_anchor, "Last evaluation should be at final anchor."
     final_score_first = evals_first[-1][1]
     assert abs(final_score_first - true_curve(final_anchor)) < 1e-8
 
-    # Case B: best_so_far is quite strict -> likely discard (no final evaluation)
-    strict_best = 1.05  # better (lower) than the true final performance.
+    strict_best = 1.05
     evals_second = evaluator.evaluate_model(best_so_far=strict_best, configuration=cfg)
-    # With such a strong best_so_far, IPL prediction should not beat it, so we discard.
     assert len(evals_second) == len(partial_schedule), (
         "With strict best_so_far, config should be discarded after partial schedule."
     )
     assert all(a < final_anchor for (a, _) in evals_second), "No final-anchor evaluations expected."
 
-    # Case C: very loose best_so_far -> we should evaluate final anchor as well.
-    loose_best = 2.0  # much worse than any realistic error here
+    loose_best = 2.0
     evals_third = evaluator.evaluate_model(best_so_far=loose_best, configuration=cfg)
     assert len(evals_third) == len(partial_schedule) + 1, "With loose best_so_far, final anchor should be evaluated."
     assert evals_third[-1][0] == final_anchor

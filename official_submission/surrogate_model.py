@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.stats import spearmanr
 from ConfigSpace import CategoricalHyperparameter, UniformIntegerHyperparameter, UniformFloatHyperparameter, Constant
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
@@ -9,7 +10,6 @@ import pandas as pd
 from sklearn.preprocessing import OneHotEncoder
 
 def _normalize_categorical_to_object_and_nan(series: pd.Series) -> pd.Series:
-    """Return series as object dtype with strings; missing → np.nan."""
     def _norm(v):
         if pd.isna(v):
             return np.nan
@@ -106,6 +106,11 @@ class SurrogateModel:
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=self.seed)
 
         self.model.fit(X_train, y_train)
+
+        y_pred_test = self.model.predict(X_test)
+        self.spearman_test_ = spearmanr(y_test, y_pred_test).correlation
+        self.n_test_ = len(y_test)
+
         self.trained_cols = list(X.columns)
 
     def predict(self, theta_new):
@@ -117,8 +122,6 @@ class SurrogateModel:
         """
         X_new = pd.DataFrame([theta_new]).copy()
 
-        # normalize categoricals same as in fit()
-        # Make sure categoricals match training-time convention
         for cname in getattr(self, "_cat_hp_names", []):
             if cname in X_new.columns:
                 X_new[cname] = _normalize_categorical_to_object_and_nan(X_new[cname])

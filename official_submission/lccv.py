@@ -3,8 +3,6 @@ from typing import Dict, List, Optional, Tuple
 
 from vertical_model_evaluator import VerticalModelEvaluator
 
-import numpy as np  # only used in the self-test
-
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +52,6 @@ class LCCV(VerticalModelEvaluator):
     ) -> List[Tuple[int, float]]:
         evaluations: List[Tuple[int, float]] = []
 
-        # Case 1: first configuration – evaluate directly at final anchor.
         if best_so_far is None:
             perf = self._predict_performance(configuration, self.final_anchor)
             evaluations.append((self.final_anchor, perf))
@@ -65,7 +62,6 @@ class LCCV(VerticalModelEvaluator):
             )
             return evaluations
 
-        # Case 2: staged evaluation with early stopping.
         anchors = self._anchor_schedule()
         previous_anchor: Optional[int] = None
         previous_perf: Optional[float] = None
@@ -108,20 +104,15 @@ class LCCV(VerticalModelEvaluator):
 
 
 if __name__ == "__main__":
-    # ---- Unit tests for LCCV ----
     logging.basicConfig(level=logging.INFO)
 
-    # Test optimistic_extrapolation numerically
     prev_a, prev_p = 10, 1.0
     curr_a, curr_p = 20, 0.8
     target_a = 40
-    # slope = (0.8 - 1.0) / (20 - 10) = -0.02
-    # C_hat(40) = 0.8 + (-0.02) * (40 - 20) = 0.4
     expected_opt = 0.4
     got_opt = LCCV.optimistic_extrapolation(prev_a, prev_p, curr_a, curr_p, target_a)
     assert abs(got_opt - expected_opt) < 1e-8, f"Unexpected optimistic extrapolation {got_opt} vs {expected_opt}"
 
-    # Dummy surrogate that follows a simple linear pattern in anchor_size
     class DummySurrogate:
 
         def predict(self, theta_new: Dict) -> float:
@@ -131,26 +122,17 @@ if __name__ == "__main__":
     surrogate = DummySurrogate()
     evaluator = LCCV(surrogate_model=surrogate, minimal_anchor=10, final_anchor=80)
 
-    cfg = {"n_neighbors": 5}  # arbitrary, surrogate ignores it
+    cfg = {"n_neighbors": 5}
 
-    # Case A: best_so_far is None → evaluate only at final anchor
     evals_first = evaluator.evaluate_model(best_so_far=None, configuration=cfg)
     assert len(evals_first) == 1, "Expected a single evaluation for first config."
     assert evals_first[0][0] == 80
     expected_final = 0.1 + 0.001 * 80  # 0.18
     assert abs(evals_first[0][1] - expected_final) < 1e-8
 
-    # Case B: staged evaluation with early stopping
-    best_so_far = 0.15  # a fairly good value (lower is better)
+    best_so_far = 0.15
 
     evals_second = evaluator.evaluate_model(best_so_far=best_so_far, configuration=cfg)
-    # With DummySurrogate:
-    # anchor 10 -> 0.11
-    # anchor 20 -> 0.12
-    # optimistic from (10,0.11) and (20,0.12) to 80:
-    # slope = (0.12 - 0.11)/(20-10) = 0.001
-    # C_hat(80) = 0.12 + 0.001 * (80-20) = 0.18 >= best_so_far (0.15)
-    # => should stop after anchor 20 (2 evaluations total).
     assert len(evals_second) == 2, f"Expected early stopping after 2 anchors, got {len(evals_second)}"
     assert evals_second[0][0] == 10 and abs(evals_second[0][1] - 0.11) < 1e-8
     assert evals_second[1][0] == 20 and abs(evals_second[1][1] - 0.12) < 1e-8

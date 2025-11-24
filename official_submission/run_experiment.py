@@ -1,21 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-final_runner.py
-
-Vertical model selection experiment harness for Assignment 2.
-
-Runs LCCV and IPL on multiple LCDB datasets and seeds, using a non-linear cost
-model c(s) = (s / s_T) ** alpha, and logs:
-
-- Per-evaluation events (anchor, score, incremental & cumulative cost)
-- Per-run summaries (total cost, early-stop fraction, final regret, etc.)
-- Regret vs cost curves on a fixed budget grid, aggregated across seeds.
-
-The resulting CSVs can be used directly for plotting and for the report.
-"""
-
 import argparse
 import logging
 from pathlib import Path
@@ -32,35 +14,9 @@ from ipl import IPL
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Cost model
-# ---------------------------------------------------------------------------
-
 def eval_cost(anchor_size: int, final_anchor: int, alpha: float) -> float:
-    """
-    Non-linear cost model for evaluating a configuration at a given anchor.
-
-        c(s) = (s / s_T) ** alpha
-
-    where s_T is the final anchor size, alpha >= 1.
-
-    Interpretation:
-        - Cost is measured in "full-size equivalent evaluations".
-        - When alpha=1, evaluating at full data costs 1, at half data costs 0.5, etc.
-        - For alpha>1, large anchors become even more expensive.
-
-    :param anchor_size: s, anchor size of the evaluation.
-    :param final_anchor: s_T, final anchor size for this dataset.
-    :param alpha: non-linearity exponent.
-    :return: cost as float.
-    """
     return float((anchor_size / final_anchor) ** alpha)
 
-
-# ---------------------------------------------------------------------------
-# Single-method runner
-# ---------------------------------------------------------------------------
 
 def run_single_method_on_dataset(
     dataset_name: str,
@@ -72,32 +28,24 @@ def run_single_method_on_dataset(
     n_configs: int,
     alpha: float,
 ) -> Tuple[List[Dict], List[Dict], float]:
-    """
-    Run one vertical method (LCCV or IPL) on one dataset for a single seed.
 
-    Returns:
-        - events: list of dicts, one per (config, anchor) evaluation
-        - regret_trace: list of dicts, one per "step" with cumulative cost & regret
-        - total_cost: final cumulative cost
-    """
-    # rng = np.random.RandomState(seed)
-
-    # Determine anchors for this dataset
     final_anchor = int(df["anchor_size"].max())
 
-    # Train surrogate model for this dataset
     surrogate_model = SurrogateModel(config_space)
     surrogate_model.fit(df)
 
-    # Build vertical evaluator instance
+    logger.info(
+        "[%s] Surrogate hold-out Spearman=%.3f (n_test=%d)",
+        dataset_name,
+        surrogate_model.spearman_test_,
+        surrogate_model.n_test_,
+    )
+
     evaluator = evaluator_cls(
         surrogate_model=surrogate_model,
         minimal_anchor=int(df["anchor_size"].min()),
         final_anchor=final_anchor,
     )
-
-    # Pre-generate a list of candidate configurations
-    # configs: List[Dict] = [dict(config_space.sample_configuration(rng)) for _ in range(n_configs)]
 
     config_space.seed(seed)
 
@@ -106,7 +54,6 @@ def run_single_method_on_dataset(
         for _ in range(n_configs)
     ]
 
-    # Pre-compute oracle final scores at final anchor for all configs
     oracle_scores: List[float] = []
     for cfg in configs:
         theta = dict(cfg)
@@ -116,42 +63,35 @@ def run_single_method_on_dataset(
 
     oracle_best = float(np.min(oracle_scores))
 
-    # Bookkeeping variables
     events: List[Dict] = []
     regret_trace: List[Dict] = []
 
     cumulative_cost = 0.0
-    best_true_so_far = np.inf   # best oracle score among fully evaluated configs
-    best_so_far_for_method = None  # best *observed* final performance (method's view)
+    best_true_so_far = np.inf
+    best_so_far_for_method = None
 
     n_full = 0
     n_partial = 0
 
-    # Main loop over configs
     step_counter = 0
 
     for cfg_id, (cfg, oracle_final) in enumerate(zip(configs, oracle_scores)):
-        # Evaluate configuration with vertical evaluator
         evaluations = evaluator.evaluate_model(best_so_far_for_method, cfg)
 
         if not evaluations:
-            # Nothing evaluated (should not happen in our implementations).
             continue
 
-        # Determine if this config reached final anchor
         reached_final = (evaluations[-1][0] == final_anchor)
         if reached_final:
             n_full += 1
         else:
             n_partial += 1
 
-        # Update best_so_far_for_method (only uses the final-anchor prediction)
         if reached_final:
             final_pred = evaluations[-1][1]
             if best_so_far_for_method is None or final_pred < best_so_far_for_method:
                 best_so_far_for_method = final_pred
 
-        # Log each evaluation event
         for local_idx, (anchor, perf_anchor) in enumerate(evaluations):
             incremental_cost = eval_cost(anchor, final_anchor, alpha)
             cumulative_cost += incremental_cost
@@ -174,13 +114,10 @@ def run_single_method_on_dataset(
                 }
             )
 
-        # Update best_true_so_far using oracle, but *only* for configs that were
-        # actually taken to the final anchor by this method.
         if reached_final:
             if oracle_final < best_true_so_far:
                 best_true_so_far = oracle_final
 
-        # Regret after finishing this config
         regret = best_true_so_far - oracle_best
         regret_trace.append(
             {
@@ -192,7 +129,6 @@ def run_single_method_on_dataset(
             }
         )
 
-    # Per-run summary
     total_cost = cumulative_cost
     n_total = n_full + n_partial if (n_full + n_partial) > 0 else 1
     frac_early = n_partial / n_total
@@ -208,8 +144,6 @@ def run_single_method_on_dataset(
         frac_early,
     )
 
-    # Add one summary dict to the "regret_trace" output? No, we return these
-    # separately from the calling function.
     run_summary = {
         "dataset": dataset_name,
         "method": method_name,
@@ -226,34 +160,15 @@ def run_single_method_on_dataset(
     return events, regret_trace, run_summary
 
 
-# ---------------------------------------------------------------------------
-# Aggregation: regret vs cost on budget grid
-# ---------------------------------------------------------------------------
-
 def build_regret_vs_cost_grid(
     all_traces: List[Dict],
     budgets: np.ndarray,
 ) -> pd.DataFrame:
-    """
-    Given a list of per-step traces (dataset, method, seed, cumulative_cost, regret),
-    build a regret-vs-cost table on a common budget grid and aggregate (mean, std)
-    across seeds.
-
-    For each (dataset, method, budget), we find for each seed the last regret
-    value <= that budget (carry-forward). If a seed has not spent that much
-    cost yet, its regret is treated as NaN for that budget.
-
-    :param all_traces: list of dicts from run_single_method_on_dataset (regret_trace).
-    :param budgets: 1D array of budget values.
-    :return: DataFrame with columns:
-             dataset, method, budget, mean_regret, std_regret, n_seeds_used
-    """
     trace_df = pd.DataFrame(all_traces)
 
     rows = []
 
     for (dataset, method), group in trace_df.groupby(["dataset", "method"]):
-        # group: all seeds for this dataset & method
         seeds = group["seed"].unique()
         for B in budgets:
             regrets_at_B = []
@@ -282,11 +197,6 @@ def build_regret_vs_cost_grid(
             )
 
     return pd.DataFrame(rows)
-
-
-# ---------------------------------------------------------------------------
-# Argument parsing and main entrypoint
-# ---------------------------------------------------------------------------
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Final vertical evaluation runner (LCCV vs IPL).")
@@ -334,7 +244,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="vertical_results",
+        default="results",
         help="Directory in which CSVs will be written.",
     )
     return parser.parse_args()
@@ -345,7 +255,6 @@ def main():
     outdir = Path(args.output_dir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # Load config space
     cs_path = Path(args.config_space_file)
     config_space = ConfigurationSpace.from_json(str(cs_path))
 
@@ -361,7 +270,6 @@ def main():
     if args.dataset_files:
         dataset_files = [str(Path(f)) for f in args.dataset_files]
     else:
-        # auto-discover all LCDB datasets of the form config_performances_dataset-*.csv
         dataset_files = sorted(
             str(p) for p in Path(".").glob("config_performances_dataset-*.csv")
         )
@@ -371,7 +279,6 @@ def main():
                 "Use --dataset_files to specify files explicitly."
             )
 
-    # Run over datasets, methods, seeds
     for dataset_file in dataset_files:
         df = pd.read_csv(dataset_file)
         dataset_name = Path(dataset_file).stem
@@ -392,7 +299,6 @@ def main():
                 all_traces.extend(regret_trace)
                 all_run_summaries.append(run_summary)
 
-    # Convert to DataFrames and save
     events_df = pd.DataFrame(all_events)
     events_path = outdir / "vertical_events.csv"
     events_df.to_csv(events_path, index=False)
@@ -403,7 +309,6 @@ def main():
     runs_df.to_csv(runs_path, index=False)
     logger.info("Wrote per-run summaries to %s", runs_path)
 
-    # Build budget grid using maximum observed cost across all runs
     if not all_traces:
         logger.warning("No traces collected; skipping regret-vs-cost grid.")
         return
